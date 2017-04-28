@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Discord;
 using Discord.Audio;
@@ -23,6 +24,8 @@ namespace BooBot
 			MixStream mixStream; // ^ merges multiple channels into one (and writes to volume)
 
 			int nextFreeChannel = 0; // todo: this is just for debugging: completely rework this, error out when there're no free channels
+			int currentlyPlaying;
+			public int CurrentlyPlayingCount => currentlyPlaying;
 
 			public async Task Start(IVoiceChannel channel)
 			{
@@ -34,7 +37,7 @@ namespace BooBot
 					return Task.CompletedTask;
 				};
 
-				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bufferMillis: 1000);
+				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bitrate: 48 * 1024, bufferMillis: 1000);
 
 				volumeControlStream = new VolumeControlPcmStream(outStream);
 				volumeControlStream.Volume = 1;
@@ -46,13 +49,18 @@ namespace BooBot
 
 			public async Task PlaySound(string fileName)
 			{
-				var c = (nextFreeChannel++) % mixStream.ChannelCount;
+				var c = Interlocked.Increment(ref nextFreeChannel);
+				c %= mixStream.ChannelCount;
 				var channelForThisSound = mixStream[c];
+
+				Interlocked.Increment(ref currentlyPlaying);
 
 				var soundStream = Debug_TranscodeFileToPcm(fileName);
 
 				await soundStream.CopyToAsync(channelForThisSound).ConfigureAwait(false);
-				await outStream.FlushAsync().ConfigureAwait(false);
+				Interlocked.Decrement(ref currentlyPlaying);
+
+				await Task.Delay(1000).ConfigureAwait(false); // todo: replace with "bufferMillis" from outStream
 				Console.WriteLine($"Audio Done: {fileName} (mixChannel #{c + 1})");
 			}
 

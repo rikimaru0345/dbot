@@ -9,6 +9,7 @@ using Discord.WebSocket;
 
 namespace BooBot
 {
+	[System.Diagnostics.CodeAnalysis.SuppressMessage("Await.Warning", "CS4014:Await.Warning")]
 	public partial class SoundBoardCommand : ModuleBase<SocketCommandContext>
 	{
 		class SoundBoardMenu : IReactionMenu
@@ -62,7 +63,6 @@ namespace BooBot
 
 				case ReactionChangeType.Added:
 					message.RemoveReactionAsync(reaction.Emoji, reaction.User.Value);
-					await message.ModifyAsync(p => p.Content = $"Playing: {reaction.Emoji.Name} *at* volume factor {int.MaxValue}.0x").ConfigureAwait(false);
 
 					if (soundClient == null)
 					{
@@ -70,13 +70,17 @@ namespace BooBot
 						await soundClient.Start(((IGuildUser)reaction.User.Value)?.VoiceChannel).ConfigureAwait(false);
 					}
 
-					var fileName = EmojiToSoundFile(reaction.Emoji);
-					if (fileName != null)
-						soundClient.PlaySound(fileName);
+					var fileName1 = EmojiToSoundFile(reaction.Emoji);
+					if (fileName1 != null)
+						soundClient.PlaySound(fileName1);
 
-					fileName = EmojiToSoundFile(reaction.Emoji);
-					if (fileName != null)
-						soundClient.PlaySound(fileName);
+					var fileName2 = EmojiToSoundFile(reaction.Emoji);
+					if (fileName2 != null)
+						soundClient.PlaySound(fileName2);
+
+
+					var newContent = $"Playing: __{Path.GetFileName(fileName1)}__ and __{Path.GetFileName(fileName2)}__ (**{soundClient.CurrentlyPlayingCount}** active sounds)";
+					await message.ModifyAsync(p => p.Content = newContent).ConfigureAwait(false);
 
 					break;
 				}
