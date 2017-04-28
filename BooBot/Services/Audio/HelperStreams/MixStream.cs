@@ -64,22 +64,26 @@ namespace BooBot
 					if (channels[i].BufferPosition > 0)
 						currentlyMixing.Add(channels[i]);
 
-				// Early out: just one channel doesn't need mixing and can directly stream to the output
+				// Can happen as a racecondition, when one thread flushed and the other one just tried the same.
+				if (currentlyMixing.Count == 0)
+					return;
+
+				// Early out: just one channel. doesn't need mixing and can directly stream to the output
 				if (currentlyMixing.Count == 1)
 				{
 					var channel = currentlyMixing[0];
 					baseStream.Write(channel.channelBuffer, 0, channel.BufferPosition);
-					channel.OnFlushed(channel.BufferPosition);
+					channel.OnFlushed(channel.BufferPosition); // We just drained everything
 					return;
 				}
 
 				// We want to mix the lowest common amount of data
 				// That will ensure that at least one channel will become completely drained.
 				int leastData = currentlyMixing.Min(c => c.BufferPosition);
-
+				
 				int samplesToTake = leastData / 2;
 
-				// Zero the accumulator buffer
+				// Reset the accumulator buffer
 				for (int i = 0; i < samplesToTake; i++)
 					accMixBuffer[i] = 0;
 
@@ -120,9 +124,14 @@ namespace BooBot
 				// finalMixBuffer contains the data we want to send to the baseStream
 				baseStream.Write(finalMixBuffer, 0, leastData);
 
+				// We can call this method with no problems because we already have locks on every buffer.
 				for (int i = 0; i < currentlyMixing.Count; i++)
 					currentlyMixing[i].OnFlushed(leastData);
 
+			}
+			catch (Exception ex)
+			{
+				Console.WriteLine("Exception in MixAndFlush : " + ex);
 			}
 			finally
 			{

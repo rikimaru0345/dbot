@@ -37,12 +37,13 @@ namespace BooBot
 				// Ok, we need to copy in whatever we can, and if we hit the limit we'll flush
 				// After the flush we have space again so we can copy over the rest.
 				// todo: improve this by using a circular buffer of fixed size instead.
-
-				lock (channelBuffer) // we need to lock here because MixAndFlush also locks on channelBuffer to make sure nobody is writing to any channel while we're mixing
+								
+				int totalWritten = 0;
+				while (totalWritten < count)
 				{
+					bool needToFlush = false;
 
-					int totalWritten = 0;
-					while (totalWritten < count)
+					lock (channelBuffer) // we need to lock here because MixAndFlush also locks on channelBuffer to make sure nobody is writing to any channel while we're mixing
 					{
 						int currentSpaceLeft = channelBuffer.Length - BufferPosition;
 						int leftToWrite = count - totalWritten;
@@ -53,11 +54,15 @@ namespace BooBot
 						BufferPosition += goingToWrite;
 						totalWritten += goingToWrite;
 
-						// If we're full now, flush! (or maybe we just wrote some left over bytes)
-						if (BufferPosition == channelBuffer.Length)
-							mixStream.MixAndFlush();
+						needToFlush = BufferPosition == channelBuffer.Length;
 					}
+
+					// If we're full now, flush! (or maybe we just wrote some left over bytes)
+					// We also must not lock here (otherwise when two threads get to this point at the same time, they'd deadlock each other)
+					if (needToFlush)
+						mixStream.MixAndFlush();
 				}
+
 			}
 
 			internal void OnFlushed(int bytesFlushed)
