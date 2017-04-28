@@ -69,11 +69,11 @@ namespace BooBot
 					CreateNoWindow = true
 				});
 
-				Task.Run(async () =>
+				Task.Run(() =>
 				{
 					// 2byte * 2channels => 4byte per sample * 48000 samples per second => 192KB/s / 1000 => 1920bytes per millisecond
 					using (var fileData = new FileStream(fileName, FileMode.Open, FileAccess.Read))
-						await fileData.CopyToAsync(p.StandardInput.BaseStream, 1920 * 10);
+						fileData.CopyTo(p.StandardInput.BaseStream, 1920 * 10);
 					p.Kill();
 				});
 
