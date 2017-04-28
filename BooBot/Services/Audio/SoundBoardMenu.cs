@@ -38,11 +38,11 @@ namespace BooBot
 				message = await channel.SendMessageAsync("__**SoundBoard**__").ConfigureAwait(false);
 
 				// Random emoji
-				message.AddReactionAsync(emoteRandom);
-				// All sounds
+				await message.AddReactionAsync(emoteRandom).ConfigureAwait(false);
+				// All sounds in any order
 				await Task.WhenAll(sounds.Select(r => message.AddReactionAsync(UnicodeEmoji.FromText(r.shorthand)))).ConfigureAwait(false);
 				// Plus the close emoji
-				message.AddReactionAsync(emoteClose);
+				await message.AddReactionAsync(emoteClose).ConfigureAwait(false);
 
 				return message;
 			}
@@ -62,7 +62,7 @@ namespace BooBot
 
 				case ReactionChangeType.Added:
 					message.RemoveReactionAsync(reaction.Emoji, reaction.User.Value);
-					await message.ModifyAsync(p => p.Content = $"Playing: {reaction.Emoji.Name} *at* volume factor {int.MaxValue}.0x");
+					await message.ModifyAsync(p => p.Content = $"Playing: {reaction.Emoji.Name} *at* volume factor {int.MaxValue}.0x").ConfigureAwait(false);
 
 					if (soundClient == null)
 					{
