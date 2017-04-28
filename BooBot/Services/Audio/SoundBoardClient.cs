@@ -7,6 +7,8 @@ using Discord;
 using Discord.Audio;
 using Discord.Commands;
 using LogProvider;
+using System.Linq;
+using BooBot.Services.Audio.HelperStreams;
 
 namespace BooBot
 {
@@ -20,10 +22,8 @@ namespace BooBot
 			IAudioClient audioClient;
 
 			AudioOutStream outStream; // final output
-			VolumeControlPcmStream volumeControlStream; // ^ adjusts volume (and writes to out)
-			MixStream mixStream; // ^ merges multiple channels into one (and writes to volume)
-
-			int nextFreeChannel = 0; // todo: this is just for debugging: completely rework this, error out when there're no free channels
+			PcmMixer mixer;
+			
 			int currentlyPlaying;
 			public int CurrentlyPlayingCount => currentlyPlaying;
 
@@ -36,32 +36,29 @@ namespace BooBot
 					Dispose();
 					return Task.CompletedTask;
 				};
-
+				
 				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bitrate: 48 * 1024, bufferMillis: 1000);
 
-				volumeControlStream = new VolumeControlPcmStream(outStream);
-				volumeControlStream.Volume = 1;
-
-				mixStream = new MixStream(volumeControlStream, 5, 1920 * 10); // 10ms
+				mixer = new PcmMixer(outStream);
 			}
 
 			Random rng = new Random();
 
 			public async Task PlaySound(string fileName)
 			{
-				var c = Interlocked.Increment(ref nextFreeChannel);
-				c %= mixStream.ChannelCount;
-				var channelForThisSound = mixStream[c];
-
 				Interlocked.Increment(ref currentlyPlaying);
 
 				var soundStream = Debug_TranscodeFileToPcm(fileName);
 
-				await soundStream.CopyToAsync(channelForThisSound).ConfigureAwait(false);
+				// await soundStream.CopyToAsync(channelForThisSound).ConfigureAwait(false);
+				// todo: return some awaitable that finishes when the source completes
+
+				mixer.AddSource(soundStream, streamMayBlock: false /* ffmpeg is fast enough for .wav files */);
+
 				Interlocked.Decrement(ref currentlyPlaying);
 
 				await Task.Delay(1000).ConfigureAwait(false); // todo: replace with "bufferMillis" from outStream
-				Console.WriteLine($"Audio Done: {fileName} (mixChannel #{c + 1})");
+				Console.WriteLine($"Audio Done: {fileName}");
 			}
 
 			Stream Debug_TranscodeFileToPcm(string fileName)

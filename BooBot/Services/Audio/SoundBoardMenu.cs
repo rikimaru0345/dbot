@@ -77,7 +77,7 @@ namespace BooBot
 					var fileName2 = EmojiToSoundFile(reaction.Emoji);
 					if (fileName2 != null)
 						soundClient.PlaySound(fileName2);
-
+					
 
 					var newContent = $"Playing: __{Path.GetFileName(fileName1)}__ and __{Path.GetFileName(fileName2)}__ (**{soundClient.CurrentlyPlayingCount}** active sounds)";
 					await message.ModifyAsync(p => p.Content = newContent).ConfigureAwait(false);
