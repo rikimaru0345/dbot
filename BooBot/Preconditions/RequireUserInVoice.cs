@@ -26,7 +26,7 @@ namespace BooBot.Preconditions
 				return errorResult;
 
 			var vcPerms = self.GetPermissions(voiceChannel);
-			if (!vcPerms.Connect || vcPerms.Speak)
+			if (!vcPerms.Connect || !vcPerms.Speak)
 				return errorResult;
 
 			return PreconditionResult.FromSuccess();
