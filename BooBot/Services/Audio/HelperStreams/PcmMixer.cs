@@ -191,6 +191,7 @@ namespace BooBot.Services.Audio.HelperStreams
 			return commonData;
 		}
 
+		// todo, volt: should this be nested? maybe not anymore because there are multiple implementations now
 		// A source from where we get delicious audio such as "JohnCena.mp3", "MLG_Airhorn.wav" and "Allahu Akbar.ogg" 
 		private abstract unsafe class AudioSource
 		{
