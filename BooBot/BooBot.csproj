@@ -143,9 +143,9 @@
     <Compile Include="CommandHandler.cs" />
     <Compile Include="Commands\HelpCommand.cs" />
     <Compile Include="Preconditions\RequireUserInVoice.cs" />
-    <Compile Include="Services\Audio\HelperStreams\CircularBuffer.cs" />
-    <Compile Include="Services\Audio\HelperStreams\IMixerSource.cs" />
-    <Compile Include="Services\Audio\HelperStreams\PcmMixer.cs" />
+    <Compile Include="Services\Audio\Helpers\CircularBuffer.cs" />
+    <Compile Include="Services\Audio\Helpers\IMixerSource.cs" />
+    <Compile Include="Services\Audio\Helpers\PcmMixer.cs" />
     <Compile Include="Services\Audio\SoundBoardClient.cs" />
     <Compile Include="Preconditions\RateLimit.cs" />
     <Compile Include="Preconditions\TestPrecondition.cs" />

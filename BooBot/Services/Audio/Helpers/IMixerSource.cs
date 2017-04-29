@@ -40,7 +40,7 @@ namespace BooBot.Services.Audio.HelperStreams
 			public int SamplesPlayed => (source.TotalBytesProcessed / 2) / Channels;
 			public TimeSpan TimePlayed => TimeSpan.FromSeconds((double)SamplesPlayed / SamplesPerSecond);
 
-			public float Volume { get => throw new NotImplementedException("todo"); set => throw new NotImplementedException("todo"); }
+			public float Volume { get => source.Volume; set => source.Volume = value; }
 
 			public Task WaitForFinish() => source.SourceState.Task; // todo, volt: is this correct? how would we best expose awaiting the completion of a mixer source??
 			public void Stop() => source.Cancel();

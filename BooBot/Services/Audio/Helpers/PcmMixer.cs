@@ -139,12 +139,20 @@ namespace BooBot.Services.Audio.HelperStreams
 				for (int c = 0; c < sources.Count; c++)
 				{
 					var source = sources[c];
+					var v = source.Volume;
+
 					fixed (byte* ptr = source.buffer)
 					{
 						short* shortBuffer = (short*)ptr;
-
-						for (int i = 0; i < samples; i++)
-							accumulatorBuffer[i] += shortBuffer[i];
+						
+						// It's worth factoring out the multiplication step here.
+						// Volume changed by less than 1% ? Then we do no adjustment
+						if ((Math.Abs(1 - v) * 100) < 1)
+							for (int i = 0; i < samples; i++)
+								accumulatorBuffer[i] += shortBuffer[i];
+						else
+							for (int i = 0; i < samples; i++)
+								accumulatorBuffer[i] += shortBuffer[i] * v;
 					}
 				}
 
@@ -229,6 +237,7 @@ namespace BooBot.Services.Audio.HelperStreams
 			public int Available => bytesInBuffer;
 			public MixerSource AsMixerSource => new MixerSource(this);
 			public int TotalBytesProcessed { get; protected set; }
+			public float Volume { get; set; }
 
 			public abstract bool IsDone { get; }
 
