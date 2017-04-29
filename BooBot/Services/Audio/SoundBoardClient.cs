@@ -38,7 +38,7 @@ namespace BooBot
 				};
 				
 				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bitrate: 48 * 1024, bufferMillis: 1000);
-
+				
 				mixer = new PcmMixer(outStream);
 			}
 
@@ -53,7 +53,9 @@ namespace BooBot
 				// await soundStream.CopyToAsync(channelForThisSound).ConfigureAwait(false);
 				// todo: return some awaitable that finishes when the source completes
 
-				mixer.AddSource(soundStream, streamMayBlock: false /* ffmpeg is fast enough for .wav files */);
+				var sourceToken = mixer.AddSource(soundStream, readAsync:true);
+
+				await sourceToken.WaitForFinish();
 
 				Interlocked.Decrement(ref currentlyPlaying);
 
