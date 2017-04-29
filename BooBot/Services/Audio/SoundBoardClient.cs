@@ -23,7 +23,7 @@ namespace BooBot
 
 			AudioOutStream outStream; // final output
 			PcmMixer mixer;
-			
+
 			int currentlyPlaying;
 			public int CurrentlyPlayingCount => currentlyPlaying;
 
@@ -36,9 +36,9 @@ namespace BooBot
 					Dispose();
 					return Task.CompletedTask;
 				};
-				
+
 				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bitrate: 48 * 1024, bufferMillis: 1000);
-				
+
 				mixer = new PcmMixer(outStream);
 			}
 
@@ -49,13 +49,10 @@ namespace BooBot
 				Interlocked.Increment(ref currentlyPlaying);
 
 				var soundStream = Debug_TranscodeFileToPcm(fileName);
+				
+				var source = mixer.AddSource(soundStream, readAsync: false);
 
-				// await soundStream.CopyToAsync(channelForThisSound).ConfigureAwait(false);
-				// todo: return some awaitable that finishes when the source completes
-
-				var sourceToken = mixer.AddSource(soundStream, readAsync:true);
-
-				await sourceToken.WaitForFinish();
+				await source.WaitForFinish();
 
 				Interlocked.Decrement(ref currentlyPlaying);
 

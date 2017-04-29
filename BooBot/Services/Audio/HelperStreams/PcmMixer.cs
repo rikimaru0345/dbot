@@ -208,7 +208,7 @@ namespace BooBot.Services.Audio.HelperStreams
 			if (commonData == int.MaxValue)
 				return (0, !viableSourcesRemaining);
 
-			return (commonData, viableSourcesRemaining);
+			return (commonData, !viableSourcesRemaining);
 		}
 
 		// todo, volt: should this be nested? maybe not anymore because there are multiple implementations now
