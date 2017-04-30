@@ -17,7 +17,7 @@ namespace BooBot
 		class SoundBoardClient : IDisposable
 		{
 			static Logger log = Logger.Create("SoundBoardClient").AddOutput(new ConsoleOutput());
-
+			
 			IVoiceChannel channel;
 			IAudioClient audioClient;
 
@@ -38,7 +38,7 @@ namespace BooBot
 				};
 
 				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bitrate: 48 * 1024, bufferMillis: 1000);
-
+				
 				mixer = new PcmMixer(outStream);
 			}
 
@@ -50,13 +50,11 @@ namespace BooBot
 
 				var soundStream = Debug_TranscodeFileToPcm(fileName);
 				
-				var source = mixer.AddSource(soundStream, readAsync: false);
-
+				var source = mixer.AddSource(soundStream, readAsync: true);
+				
 				await source.WaitForFinish();
 
-				Interlocked.Decrement(ref currentlyPlaying);
-
-				await Task.Delay(1000).ConfigureAwait(false); // todo: replace with "bufferMillis" from outStream
+				Interlocked.Decrement(ref currentlyPlaying);				
 				Console.WriteLine($"Audio Done: {fileName}");
 			}
 

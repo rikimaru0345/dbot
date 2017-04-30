@@ -9,15 +9,20 @@ using LogProvider;
 
 namespace BooBot.Services.Audio.HelperStreams
 {
-	// Takes an egress stream that it writes to.
-	// Can take multiple source streams that it will read from.
-	// The mixer will take audio frames from all source streams, mix them together, and write to them
-	// !! Warning: This class is only intended for the common use case:
-	// !!          - high-performance
-	// !!          - easy to use audio signal mixing for discord
-	// !!          This class assumes PCM 48KHz Stereo throughout for performance reasons, which
-	// !!          should be perfectly fine most of the time, if you need something else you
-	// !!          will know anyway (and use a dedicated library anyway!)
+	/// <summary>
+	/// Takes an egress stream that it writes to.
+	/// Can take multiple source streams that it will read from.
+	/// The mixer will take audio frames from all source streams, mix them together, and write to them
+	/// </summary>
+	/// <remarks>
+	/// Warning:
+	/// This class is only intended for the common use case:
+	/// - high-performance
+	/// - easy to use audio signal mixing for discord
+	/// This class assumes PCM 48KHz Stereo throughout for performance reasons, which
+	/// should be perfectly fine most of the time, if you need something else you
+	/// will know anyway (and use a dedicated library anyway!)
+	/// </remarks>
 	partial class PcmMixer
 	{
 		private const int SamplesPerSecond = 48 * 1000; // 48KHz - 48000 samples per second (for one channel)
@@ -35,7 +40,7 @@ namespace BooBot.Services.Audio.HelperStreams
 		readonly float[] accumulatorBuffer;
 		readonly byte[] finalMixBuffer; // kingdom hearts hehe
 
-		Task mixerTask;
+		int isMixerTaskActive = 0;
 
 		public float Volume { get; set; } = 1f;
 
@@ -51,19 +56,19 @@ namespace BooBot.Services.Audio.HelperStreams
 
 		/// <summary>
 		/// Adds a source to the mixer.
-		/// Pay close attention to the <paramref name="streamMayBlock"/> parameter if you read from a network source instead of a local file.
+		/// Pay close attention to the <paramref name="readAsync"/> parameter if you read from a network source instead of a local file.
 		/// If ingress streams block Reads the whole mixer will become stuck.
 		/// Set <paramref name="streamMayBlock"/> to true to prevent this by paying a small performance overhead.
 		/// </summary>
 		/// <param name="sourcePcmStream">the stream to read audio from</param>
-		/// <param name="streamMayBlock">set this to true if you think it's possible that this source could block (provide audio data in less than realtime)</param>
+		/// <param name="readAsync">set this to true if you think it's possible that this source could block (provide audio data in less than realtime)</param>
 		public IMixerSource AddSource(Stream sourcePcmStream, bool readAsync)
 		{
 			if (!sourcePcmStream.CanRead)
 				throw new InvalidOperationException("Source stream must be readable");
 
-			if (readAsync)
-				throw new NotImplementedException("not yet done and tested... use blocking reads for now");
+			//if (readAsync)
+			//	throw new NotImplementedException("not yet done and tested... use blocking reads for now");
 
 			AudioSource audioSource = readAsync ?
 				(AudioSource)new AutoFillingSource(sourcePcmStream, bufferSize) :
@@ -73,8 +78,8 @@ namespace BooBot.Services.Audio.HelperStreams
 			{
 				sources.Add(audioSource);
 
-				if (mixerTask == null || mixerTask.IsCompleted)
-					mixerTask = Task.Run(() => MixProcessingTask());
+				if (Interlocked.CompareExchange(ref isMixerTaskActive, 1, 0) == 0)
+					Task.Run(() => MixProcessingTask());
 			}
 
 			return new MixerSource(audioSource);
@@ -144,7 +149,7 @@ namespace BooBot.Services.Audio.HelperStreams
 					fixed (byte* ptr = source.buffer)
 					{
 						short* shortBuffer = (short*)ptr;
-						
+
 						// It's worth factoring out the multiplication step here.
 						// Volume changed by less than 1% ? Then we do no adjustment
 						if ((Math.Abs(1 - v) * 100) < 1)
@@ -192,7 +197,7 @@ namespace BooBot.Services.Audio.HelperStreams
 
 					source.FillBuffer();
 
-					if (source.IsDone)
+					if (source.IsDone && source.Available == 0)
 					{
 						sources.RemoveAt(i--);
 						continue;
@@ -210,6 +215,9 @@ namespace BooBot.Services.Audio.HelperStreams
 					commonData = Math.Min(commonData, available);
 					activeSources.Add(source);
 				}
+
+				if (!viableSourcesRemaining)
+					Interlocked.Exchange(ref isMixerTaskActive, 0);
 			}
 
 			// Just to make sure we got at least one source with available data
@@ -237,9 +245,9 @@ namespace BooBot.Services.Audio.HelperStreams
 			public int Available => bytesInBuffer;
 			public MixerSource AsMixerSource => new MixerSource(this);
 			public int TotalBytesProcessed { get; protected set; }
-			public float Volume { get; set; }
+			public float Volume { get; set; } = 1;
 
-			public abstract bool IsDone { get; }
+			public bool IsDone { get; protected set; }
 
 
 			protected AudioSource(Stream sourceStream, int bufferSize)
@@ -260,9 +268,6 @@ namespace BooBot.Services.Audio.HelperStreams
 		// Direct sources have literally zero overhead. We would need a byte array anyway at some point.
 		sealed class DirectSource : AudioSource
 		{
-			bool isDone;
-			public override bool IsDone => isDone;
-
 			public DirectSource(Stream sourceStream, int bufferSize) : base(sourceStream, bufferSize)
 			{
 			}
@@ -270,7 +275,7 @@ namespace BooBot.Services.Audio.HelperStreams
 			// Direct sources (from a file) just do static reads, they are fast enough to never cause us any trouble.
 			public override void FillBuffer()
 			{
-				if (isDone)
+				if (IsDone)
 					return;
 
 				int spaceLeft = buffer.Length - bytesInBuffer;
@@ -287,7 +292,7 @@ namespace BooBot.Services.Audio.HelperStreams
 				catch (Exception ex)
 				{
 					SourceState.SetException(ex);
-					isDone = true;
+					IsDone = true;
 					sourceStream.Dispose();
 					return;
 				}
@@ -295,7 +300,7 @@ namespace BooBot.Services.Audio.HelperStreams
 				if (read == 0)
 				{
 					// We've reached the end
-					isDone = true;
+					IsDone = true;
 					SourceState.SetResult(0);
 					sourceStream.Dispose();
 				}
@@ -318,7 +323,7 @@ namespace BooBot.Services.Audio.HelperStreams
 
 			public override void Cancel()
 			{
-				isDone = true;
+				IsDone = true;
 				sourceStream.Dispose();
 				SourceState.SetResult(0);
 			}
@@ -327,11 +332,8 @@ namespace BooBot.Services.Audio.HelperStreams
 		// Uses a task to keep filling its buffer
 		sealed class AutoFillingSource : AudioSource
 		{
-			bool isDone;
-			public override bool IsDone => isDone;
-
-			volatile int isReading = 0;
-			volatile int isDraining = 0;
+			AutoResetEvent dataDrainedEvent = new AutoResetEvent(true);
+			int isReading = 0;
 
 			// When we're dealing with multiple threads we have to do some double buffering (at least to keep it simple)
 			byte[] localReadBuffer;
@@ -344,57 +346,63 @@ namespace BooBot.Services.Audio.HelperStreams
 			// Direct sources (from a file) just do static reads, they are fast enough to never cause us any trouble.
 			public override void FillBuffer()
 			{
-				if (isDone)
+				if (IsDone)
 					// Nothing left to read
 					return;
 
-				if (buffer.Length - bytesInBuffer == 0)
-					// No space to read at the moment
-					// This check alone is not enough, we have to check again inside the task to prevent race-conditions
-					return;
-
 				if (Interlocked.CompareExchange(ref isReading, 1, 0) == 1)
-					// Last read is still pending
+					// Already reading
 					return;
 
 				// Using async/await for reading from the stream would massively complicate things (if done correctly)
-				// todo: eventually we want to have one task reading from the source asynchronously with some good doublebuffering
+				// todo: eventually we want to have one task reading from the source asynchronously
 				// that could improve performance a bit, not sure if its needed anyway though
 				Task.Run((Action)ReadTask);
 			}
 
 			void ReadTask()
 			{
-				int spaceLeft = buffer.Length - bytesInBuffer;
-
-				if (spaceLeft == 0)
+				while (true)
 				{
-					Interlocked.Exchange(ref isReading, 0);
-					return;
+					int spaceLeft = buffer.Length - bytesInBuffer;
+
+					if (spaceLeft == 0)
+					{
+						// Wait for the "we got more space" signal
+						dataDrainedEvent.WaitOne();
+						continue;
+					}
+
+					int read;
+					try
+					{
+						read = sourceStream.Read(localReadBuffer, 0, spaceLeft);
+					}
+					catch (Exception ex)
+					{
+						SourceState.SetException(ex);
+						IsDone = true;
+						// no need to "release" isReading here
+						return;
+					}
+
+					if (spaceLeft > 0 && read == 0)
+					{
+						IsDone = true;
+						sourceStream.Dispose();
+						SourceState.SetResult(0);
+						break;
+					}
+
+					// Copy over the data we just read, no way around the lock here...
+					lock (buffer)
+					{
+						Buffer.BlockCopy(localReadBuffer, 0, buffer, bytesInBuffer, read);
+						bytesInBuffer += read;
+					}
 				}
 
-				int read;
-				try
-				{
-					read = sourceStream.Read(localReadBuffer, 0, spaceLeft);
-				}
-				catch (Exception ex)
-				{
-					SourceState.SetException(ex);
-					isDone = true;
-					// no need to "release" isReading here
-					return;
-				}
-
-				if (spaceLeft > 0 && read == 0)
-				{
-					isDone = true;
-					sourceStream.Dispose();
-					SourceState.SetResult(0);
-				}
-
-				bytesInBuffer += read;
-
+				// Signal we're not reading anymore
 				Interlocked.Exchange(ref isReading, 0);
 			}
 
@@ -411,11 +419,14 @@ namespace BooBot.Services.Audio.HelperStreams
 				Buffer.BlockCopy(buffer, bytesDrained, buffer, 0, buffer.Length - bytesDrained);
 				bytesInBuffer -= bytesDrained;
 				TotalBytesProcessed += bytesDrained;
+				dataDrainedEvent.Set();
+
+				Monitor.Exit(buffer);
 			}
 
 			public override void Cancel()
 			{
-				isDone = true;
+				IsDone = true;
 				sourceStream.Dispose();
 				SourceState.SetResult(0);
 			}
