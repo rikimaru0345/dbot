@@ -52,7 +52,7 @@ namespace BooBot
 
 				try
 				{
-					var source = mixer.AddSource(soundStream, readAsync: true);
+					var source = mixer.AddSource(soundStream, readAsync: false);
 					await source.WaitForFinish();
 				}
 				catch (Exception ex)

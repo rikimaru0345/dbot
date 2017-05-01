@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,7 +24,7 @@ namespace BooBot.Services.Audio.HelperStreams
 	/// should be perfectly fine most of the time, if you need something else you
 	/// will know anyway (and use a dedicated library anyway!)
 	/// </remarks>
-	partial class PcmMixer
+	unsafe partial class PcmMixer : IDisposable
 	{
 		const int SamplesPerSecond = 48 * 1000; // 48KHz - 48000 samples per second (for one channel)
 		const int Channels = 2; // Stereo
@@ -37,7 +38,11 @@ namespace BooBot.Services.Audio.HelperStreams
 		readonly List<AudioSource> _sources = new List<AudioSource>();
 
 		readonly int _bufferSize;
+
 		readonly float[] _accumulatorBuffer;
+		readonly GCHandle _accumulatorHandle;
+		readonly float* _accumulatorPtr;
+
 		readonly byte[] _finalMixBuffer; // kingdom hearts hehe
 
 		bool _sourcesStale;
@@ -50,10 +55,14 @@ namespace BooBot.Services.Audio.HelperStreams
 
 		public PcmMixer(Stream outputStream, int bufferSize = BytesPerMs * 1000)
 		{
-			this._egressStream = outputStream;
-			this._bufferSize = bufferSize;
-			this._accumulatorBuffer = new float[bufferSize / 2]; // 2 bytes => 1 sample
-			this._finalMixBuffer = new byte[bufferSize];
+			_egressStream = outputStream;
+			_bufferSize = bufferSize;
+
+			_accumulatorBuffer = new float[bufferSize / 2];
+			_accumulatorHandle = GCHandle.Alloc(_accumulatorBuffer, GCHandleType.Pinned);
+			_accumulatorPtr = (float*)_accumulatorHandle.AddrOfPinnedObject();
+
+			_finalMixBuffer = new byte[bufferSize];
 		}
 
 
@@ -85,7 +94,17 @@ namespace BooBot.Services.Audio.HelperStreams
 				if (needToStartMixer)
 				{
 					_cancelToken = new CancellationTokenSource();
-					_mixerTask = Task.Run(() => MixProcessingTask());
+					_mixerTask = Task.Run(() =>
+					{
+						try
+						{
+							MixProcessingTask();
+						}
+						catch (Exception ex)
+						{
+							log.Error("Exception in mixer: " + ex);
+						}
+					});
 				}
 
 				_sourcesStale = true;
@@ -94,22 +113,24 @@ namespace BooBot.Services.Audio.HelperStreams
 			return new MixerSource(audioSource);
 		}
 
-		void RemoveSource(AudioSource source)
+		bool RemoveSource(AudioSource source)
 		{
 			lock (_sources)
 			{
-				_sources.Remove(source);
+				bool removed = _sources.Remove(source);
 
 				if (_sources.Count == 0)
 					_cancelToken.Cancel();
 
 				_sourcesStale = true;
+				return removed;
 			}
 		}
 
 
 		void MixProcessingTask()
 		{
+			log.Debug("PcmMixerTask started");
 			// local copy of all active sources
 			// even the ones that are still active but are currently not providing any data
 			// (network buffering, HDD spinning up, ffmpeg have a bad day, ...)
@@ -133,13 +154,15 @@ namespace BooBot.Services.Audio.HelperStreams
 					// How can we wait for source data to become available?
 					// Should we even aim to remove this as it only happens in exceptional circumstances anyway?
 					Thread.Sleep(10);
-				
+
 				// Merge all pcm data we have so far
 				MixIntoEgressBuffer(workingSources, bytesToMix);
-				
+
 				// Write our final data to egress.
 				_egressStream.Write(_finalMixBuffer, 0, bytesToMix);
 			}
+
+			log.Debug("PcmMixerTask stopped");
 		}
 
 		void MixIntoEgressBuffer(List<AudioSource> workingSources, int bytesToMix)
@@ -154,8 +177,7 @@ namespace BooBot.Services.Audio.HelperStreams
 			//
 			// 1.) Reset the accumulator buffer
 			//
-			for (int i = 0; i < samples; i++)
-				_accumulatorBuffer[i] = 0;
+			Array.Clear(_accumulatorBuffer, 0, _accumulatorBuffer.Length);
 
 			unsafe
 			{
@@ -163,7 +185,7 @@ namespace BooBot.Services.Audio.HelperStreams
 				// 2.) Accumulate data from all channels
 				//
 				for (int c = 0; c < workingSources.Count; c++)
-					workingSources[c].MixInto(_accumulatorBuffer, bytesToMix);				
+					workingSources[c].MixInto(_accumulatorPtr, bytesToMix);
 
 				//
 				// 3.) Adjust volume and clip, writing to finalMix
@@ -196,7 +218,7 @@ namespace BooBot.Services.Audio.HelperStreams
 				for (int i = 0; i < _sources.Count; i++)
 					localSources.Add(_sources[i]);
 				_sourcesStale = false;
-			}			
+			}
 		}
 
 		// Determines what sources we want to process this frame, as well as how many bytes we should mix
@@ -211,7 +233,7 @@ namespace BooBot.Services.Audio.HelperStreams
 
 				if (!s.IsDone)
 					s.FillBuffer();
-				
+
 				int a = s.Available;
 				if (a > 0 && (a % 4) == 0) // We only use full stereo samples.
 				{
@@ -222,8 +244,8 @@ namespace BooBot.Services.Audio.HelperStreams
 				else if (a == 0 && s.IsDone)
 				{
 					// Source is done and fully drained
-					RemoveSource(s);
-					i--;
+					if (RemoveSource(s))
+						i--;
 				}
 			}
 
@@ -231,5 +253,33 @@ namespace BooBot.Services.Audio.HelperStreams
 				return 0;
 			return bytesToMix;
 		}
+
+
+
+		void Dispose(bool disposing)
+		{
+			if (disposing)
+			{
+				bool lockTaken = false;
+				Monitor.TryEnter(_sources, 100, ref lockTaken);
+				// We'd like to release memory right now, but 
+				// if we cannot take the lock right now for whatever reason
+				// we'll just leave it to the GC + Finalizer :ok_hand:
+				if (lockTaken)
+				{
+					for (int i = 0; i < _sources.Count; i++)
+						_sources[i].Dispose();
+					_sources.Clear();
+				}
+				Monitor.Exit(_sources);
+			}
+
+			_accumulatorHandle.Free();
+
+			GC.SuppressFinalize(this);
+		}
+
+		public void Dispose() => Dispose(true);
+		~PcmMixer() => Dispose(false);
 	}
 }
