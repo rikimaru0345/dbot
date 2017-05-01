@@ -17,7 +17,7 @@ namespace BooBot
 		class SoundBoardClient : IDisposable
 		{
 			static Logger log = Logger.Create("SoundBoardClient").AddOutput(new ConsoleOutput());
-			
+
 			IVoiceChannel channel;
 			IAudioClient audioClient;
 
@@ -38,7 +38,7 @@ namespace BooBot
 				};
 
 				outStream = audioClient.CreatePCMStream(AudioApplication.Mixed, bitrate: 48 * 1024, bufferMillis: 1000);
-				
+
 				mixer = new PcmMixer(outStream);
 			}
 
@@ -49,12 +49,18 @@ namespace BooBot
 				Interlocked.Increment(ref currentlyPlaying);
 
 				var soundStream = Debug_TranscodeFileToPcm(fileName);
-				
-				var source = mixer.AddSource(soundStream, readAsync: true);
-				
-				await source.WaitForFinish();
 
-				Interlocked.Decrement(ref currentlyPlaying);				
+				try
+				{
+					var source = mixer.AddSource(soundStream, readAsync: true);
+					await source.WaitForFinish();
+				}
+				catch (Exception ex)
+				{
+					log.Error("Exception while playing audio " + Path.GetFileName(fileName) + ": " + ex);
+				}
+
+				Interlocked.Decrement(ref currentlyPlaying);
 				Console.WriteLine($"Audio Done: {fileName}");
 			}
 
@@ -73,10 +79,21 @@ namespace BooBot
 
 				Task.Run(() =>
 				{
-					// 2byte * 2channels => 4byte per sample * 48000 samples per second => 192KB/s / 1000 => 1920bytes per millisecond
-					using (var fileData = new FileStream(fileName, FileMode.Open, FileAccess.Read))
-						fileData.CopyTo(p.StandardInput.BaseStream, 1920 * 10);
-					p.Kill();
+					try
+					{
+						// 2byte * 2channels => 4byte per sample * 48000 samples per second => 192KB/s / 1000 => 1920bytes per millisecond
+						using (var fileData = new FileStream(fileName, FileMode.Open, FileAccess.Read))
+							fileData.CopyTo(p.StandardInput.BaseStream, 1920 * 10);
+					}
+					catch (Exception ex)
+					{
+						log.Error("Exception while writing data from file to ffmpeg: " + ex);
+						throw;
+					}
+					finally
+					{
+						p.Kill();
+					}
 				});
 
 				return p.StandardOutput.BaseStream;
