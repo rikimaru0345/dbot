@@ -44,7 +44,7 @@ namespace BooBot.Services.Audio.HelperStreams
 
 			public Task WaitForFinish() => source.SourceState.Task; // todo, volt: is this correct? how would we best expose awaiting the completion of a mixer source??
 			public void Stop() => source.Cancel();
-			
+
 
 			public MixerSource(AudioSource source) => this.source = source;
 		}

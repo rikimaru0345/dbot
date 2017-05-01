@@ -25,32 +25,35 @@ namespace BooBot.Services.Audio.HelperStreams
 	/// </remarks>
 	partial class PcmMixer
 	{
-		private const int SamplesPerSecond = 48 * 1000; // 48KHz - 48000 samples per second (for one channel)
-		private const int Channels = 2; // Stereo
-		private const int BytesPerSecond = (SamplesPerSecond * 2) * Channels; // One sample consists of 2 bytes.
-		private const int BytesPerMs = BytesPerSecond / 1000;
+		const int SamplesPerSecond = 48 * 1000; // 48KHz - 48000 samples per second (for one channel)
+		const int Channels = 2; // Stereo
+		const int BytesPerSecond = (SamplesPerSecond * 2) * Channels; // One sample consists of 2 bytes.
+		const int BytesPerMs = BytesPerSecond / 1000;
 
 		Logger log = Logger.Create("PcmAudioMixer").AddOutput(new ConsoleOutput());
 
 		// Where we write out mixed output to
-		readonly Stream egressStream;
-		readonly List<AudioSource> sources = new List<AudioSource>();
+		readonly Stream _egressStream;
+		readonly List<AudioSource> _sources = new List<AudioSource>();
 
-		readonly int bufferSize;
-		readonly float[] accumulatorBuffer;
-		readonly byte[] finalMixBuffer; // kingdom hearts hehe
+		readonly int _bufferSize;
+		readonly float[] _accumulatorBuffer;
+		readonly byte[] _finalMixBuffer; // kingdom hearts hehe
 
-		int isMixerTaskActive = 0;
+		bool _sourcesStale;
+		CancellationTokenSource _cancelToken;
+		Task _mixerTask;
+
 
 		public float Volume { get; set; } = 1f;
 
 
 		public PcmMixer(Stream outputStream, int bufferSize = BytesPerMs * 1000)
 		{
-			this.egressStream = outputStream;
-			this.bufferSize = bufferSize;
-			this.accumulatorBuffer = new float[bufferSize / 2]; // 2 bytes => 1 sample
-			this.finalMixBuffer = new byte[bufferSize];
+			this._egressStream = outputStream;
+			this._bufferSize = bufferSize;
+			this._accumulatorBuffer = new float[bufferSize / 2]; // 2 bytes => 1 sample
+			this._finalMixBuffer = new byte[bufferSize];
 		}
 
 
@@ -71,57 +74,75 @@ namespace BooBot.Services.Audio.HelperStreams
 			//	throw new NotImplementedException("not yet done and tested... use blocking reads for now");
 
 			AudioSource audioSource = readAsync ?
-				(AudioSource)new AutoFillingSource(sourcePcmStream, bufferSize) :
-				(AudioSource)new DirectSource(sourcePcmStream, bufferSize);
+				(AudioSource)new AutoFillingSource(sourcePcmStream, _bufferSize) :
+				(AudioSource)new DirectSource(sourcePcmStream, _bufferSize);
 
-			lock (sources)
+			lock (_sources)
 			{
-				sources.Add(audioSource);
+				bool needToStartMixer = _sources.Count == 0;
+				_sources.Add(audioSource);
 
-				if (Interlocked.CompareExchange(ref isMixerTaskActive, 1, 0) == 0)
-					Task.Run(() => MixProcessingTask());
+				if (needToStartMixer)
+				{
+					_cancelToken = new CancellationTokenSource();
+					_mixerTask = Task.Run(() => MixProcessingTask());
+				}
+
+				_sourcesStale = true;
 			}
 
 			return new MixerSource(audioSource);
 		}
 
+		void RemoveSource(AudioSource source)
+		{
+			lock (_sources)
+			{
+				_sources.Remove(source);
+
+				if (_sources.Count == 0)
+					_cancelToken.Cancel();
+
+				_sourcesStale = true;
+			}
+		}
 
 
 		void MixProcessingTask()
 		{
-			List<AudioSource> activeSources = new List<AudioSource>();
+			// local copy of all active sources
+			// even the ones that are still active but are currently not providing any data
+			// (network buffering, HDD spinning up, ffmpeg have a bad day, ...)
+			List<AudioSource> localSources = new List<AudioSource>();
+			List<AudioSource> workingSources = new List<AudioSource>(); // sources that have data available *right now*
 
 			while (true)
 			{
 				// Get a view we can work with in a thread-safe manner
-				(int availableBytes, bool stop) = UpdateActiveSources(activeSources);
+				if (_sourcesStale)
+					CopySources(localSources);
 
-				if (stop)
-					// todo: a race-condition is possible here.
-					// While we're checking our copy-list, a new instance could have been added just now.
-					// The thread that just added a source saw us still active, but we're in the
-					// process of exiting.
+				int bytesToMix = UpdateWorkingSources(localSources, workingSources);
+
+				if (_cancelToken.IsCancellationRequested)
 					break;
 
-
-				// Gives sources a chance to lock their internal buffers
-				for (int s = 0; s < activeSources.Count; s++)
-					activeSources[s].EnterDrainMode();
-
+				if (bytesToMix == 0)
+					// We are (or at least want to be) always on a dedicated thread, what else to do?
+					// Spinning would be a lot worse than this.
+					// How can we wait for source data to become available?
+					// Should we even aim to remove this as it only happens in exceptional circumstances anyway?
+					Thread.Sleep(10);
+				
 				// Merge all pcm data we have so far
-				MixIntoEgressBuffer(activeSources, availableBytes);
-
-				// Let all sources know how much data we have consumed
-				// And give them a chance to unlock their buffers, start their tasks, ...
-				for (int s = 0; s < activeSources.Count; s++)
-					activeSources[s].ExitDrainMode(availableBytes);
-
+				MixIntoEgressBuffer(workingSources, bytesToMix);
+				
 				// Write our final data to egress.
-				egressStream.Write(finalMixBuffer, 0, availableBytes);
+				_egressStream.Write(_finalMixBuffer, 0, bytesToMix);
 			}
 		}
 
-		void MixIntoEgressBuffer(List<AudioSource> sources, int bytesToMix)
+		void MixIntoEgressBuffer(List<AudioSource> workingSources, int bytesToMix)
 		{
 			// It is important that this function does not write to
 			// egress directly because it will block most likely.
@@ -134,43 +155,26 @@ namespace BooBot.Services.Audio.HelperStreams
 			// 1.) Reset the accumulator buffer
 			//
 			for (int i = 0; i < samples; i++)
-				accumulatorBuffer[i] = 0;
+				_accumulatorBuffer[i] = 0;
 
 			unsafe
 			{
 				//
 				// 2.) Accumulate data from all channels
 				//
-				for (int c = 0; c < sources.Count; c++)
-				{
-					var source = sources[c];
-					var v = source.Volume;
-
-					fixed (byte* ptr = source.buffer)
-					{
-						short* shortBuffer = (short*)ptr;
-
-						// It's worth factoring out the multiplication step here.
-						// Volume changed by less than 1% ? Then we do no adjustment
-						if ((Math.Abs(1 - v) * 100) < 1)
-							for (int i = 0; i < samples; i++)
-								accumulatorBuffer[i] += shortBuffer[i];
-						else
-							for (int i = 0; i < samples; i++)
-								accumulatorBuffer[i] += shortBuffer[i] * v;
-					}
-				}
+				for (int c = 0; c < workingSources.Count; c++)
+					workingSources[c].MixInto(_accumulatorBuffer, bytesToMix);				
 
 				//
 				// 3.) Adjust volume and clip, writing to finalMix
 				//
-				fixed (byte* finalMixPtr = finalMixBuffer)
+				fixed (byte* finalMixPtr = _finalMixBuffer)
 				{
 					float v = Volume;
 					short* finalMixShort = (short*)finalMixPtr;
 					for (int i = 0; i < samples; i++)
 					{
-						var f = accumulatorBuffer[i] * v;
+						var f = _accumulatorBuffer[i] * v;
 
 						if (f < short.MinValue)
 							f = short.MinValue;
@@ -183,253 +187,49 @@ namespace BooBot.Services.Audio.HelperStreams
 			}
 		}
 
-		(int bytesToMix, bool stopProcessing) UpdateActiveSources(List<AudioSource> activeSources)
+		void CopySources(List<AudioSource> localSources)
 		{
-			activeSources.Clear();
-			int commonData = int.MaxValue;
-			bool viableSourcesRemaining = false;
+			localSources.Clear();
 
-			lock (sources)
+			lock (_sources)
 			{
-				for (int i = 0; i < sources.Count; i++)
-				{
-					var source = sources[i];
-
-					source.FillBuffer();
-
-					if (source.IsDone && source.Available == 0)
-					{
-						sources.RemoveAt(i--);
-						continue;
-					}
-
-					viableSourcesRemaining = true;
-
-					var available = source.Available;
-					if (available == 0)
-						continue;
-
-					if ((available % 4) != 0)
-						continue; // We only operate on full sample-pairs (2 samples (one per channel), each 2 bytes)
-
-					commonData = Math.Min(commonData, available);
-					activeSources.Add(source);
-				}
-
-				if (!viableSourcesRemaining)
-					Interlocked.Exchange(ref isMixerTaskActive, 0);
-			}
-
-			// Just to make sure we got at least one source with available data
-			if (commonData == int.MaxValue)
-				return (0, !viableSourcesRemaining);
-
-			return (commonData, !viableSourcesRemaining);
+				for (int i = 0; i < _sources.Count; i++)
+					localSources.Add(_sources[i]);
+				_sourcesStale = false;
+			}			
 		}
 
-		// todo, volt: should this be nested? maybe not anymore because there are multiple implementations now
-		// A source from where we get delicious audio such as "JohnCena.mp3", "MLG_Airhorn.wav" and "Allahu Akbar.ogg" 
-		private abstract unsafe class AudioSource
+		// Determines what sources we want to process this frame, as well as how many bytes we should mix
+		int UpdateWorkingSources(List<AudioSource> allSources, List<AudioSource> workingSources)
 		{
-			public TaskCompletionSource<int> SourceState { get; } = new TaskCompletionSource<int>();
+			int bytesToMix = int.MaxValue;
 
-			protected readonly Stream sourceStream;
-
-			// todo, volt: we want to avoid both:
-			// 1.) exposing an internal buffer like this because its just terrible design
-			// 2.) having a Read(...) method, which would essentially force us to provide a buffer, which would cause yet another data-copy
-			// Number 2 is definitely not an option since we're dealing with real-time data.
-			internal readonly byte[] buffer;
-			protected int bytesInBuffer;
-
-			public int Available => bytesInBuffer;
-			public MixerSource AsMixerSource => new MixerSource(this);
-			public int TotalBytesProcessed { get; protected set; }
-			public float Volume { get; set; } = 1;
-
-			public bool IsDone { get; protected set; }
-
-
-			protected AudioSource(Stream sourceStream, int bufferSize)
+			workingSources.Clear();
+			for (int i = 0; i < allSources.Count; i++)
 			{
-				this.sourceStream = sourceStream;
-				buffer = new byte[bufferSize];
-			}
+				var s = allSources[i];
 
-			// Tell this source to read form its internal source
-			public abstract void FillBuffer();
-
-			public abstract void EnterDrainMode();
-			public abstract void ExitDrainMode(int bytesDrained);
-
-			public abstract void Cancel();
-		}
-
-		// Direct sources have literally zero overhead. We would need a byte array anyway at some point.
-		sealed class DirectSource : AudioSource
-		{
-			public DirectSource(Stream sourceStream, int bufferSize) : base(sourceStream, bufferSize)
-			{
-			}
-
-			// Direct sources (from a file) just do static reads, they are fast enough to never cause us any trouble.
-			public override void FillBuffer()
-			{
-				if (IsDone)
-					return;
-
-				int spaceLeft = buffer.Length - bytesInBuffer;
-
-				if (spaceLeft == 0)
-					// buffer is full at the moment
-					return;
-
-				int read;
-				try
+				if (!s.IsDone)
+					s.FillBuffer();
+				
+				int a = s.Available;
+				if (a > 0 && (a % 4) == 0) // We only use full stereo samples.
 				{
-					read = sourceStream.Read(buffer, bytesInBuffer, spaceLeft);
+					// Enough data available
+					workingSources.Add(s);
+					bytesToMix = Math.Min(bytesToMix, s.Available);
 				}
-				catch (Exception ex)
+				else if (a == 0 && s.IsDone)
 				{
-					SourceState.SetException(ex);
-					IsDone = true;
-					sourceStream.Dispose();
-					return;
+					// Source is done and fully drained
+					RemoveSource(s);
+					i--;
 				}
-
-				if (read == 0)
-				{
-					// We've reached the end
-					IsDone = true;
-					SourceState.SetResult(0);
-					sourceStream.Dispose();
-				}
-
-				bytesInBuffer += read;
 			}
 
-			public override void EnterDrainMode()
-			{
-				// There's nothing for us to do.
-				// Nobody will contend the buffer in direct mode.
-			}
-
-			public override void ExitDrainMode(int bytesDrained)
-			{
-				Buffer.BlockCopy(buffer, bytesDrained, buffer, 0, buffer.Length - bytesDrained);
-				bytesInBuffer -= bytesDrained;
-				TotalBytesProcessed += bytesDrained;
-			}
-
-			public override void Cancel()
-			{
-				IsDone = true;
-				sourceStream.Dispose();
-				SourceState.SetResult(0);
-			}
-		}
-
-		// Uses a task to keep filling its buffer
-		sealed class AutoFillingSource : AudioSource
-		{
-			AutoResetEvent dataDrainedEvent = new AutoResetEvent(true);
-			int isReading = 0;
-
-			// When we're dealing with multiple threads we have to do some double buffering (at least to keep it simple)
-			byte[] localReadBuffer;
-
-			public AutoFillingSource(Stream sourceStream, int bufferSize) : base(sourceStream, bufferSize)
-			{
-				localReadBuffer = new byte[bufferSize];
-			}
-
-			// Direct sources (from a file) just do static reads, they are fast enough to never cause us any trouble.
-			public override void FillBuffer()
-			{
-				if (IsDone)
-					// Nothing left to read
-					return;
-
-				if (Interlocked.CompareExchange(ref isReading, 1, 0) == 1)
-					// Already reading
-					return;
-
-				// Using async/await for reading from the stream would massively complicate things (if done correctly)
-				// todo: eventually we want to have one task reading from the source asynchronously
-				// that could improve performance a bit, not sure if its needed anyway though
-				Task.Run((Action)ReadTask);
-			}
-
-			void ReadTask()
-			{
-				while (true)
-				{
-					int spaceLeft = buffer.Length - bytesInBuffer;
-
-					if (spaceLeft == 0)
-					{
-						// Wait for the "we got more space" signal
-						dataDrainedEvent.WaitOne();
-						continue;
-					}
-
-					int read;
-					try
-					{
-						read = sourceStream.Read(localReadBuffer, 0, spaceLeft);
-					}
-					catch (Exception ex)
-					{
-						SourceState.SetException(ex);
-						IsDone = true;
-						// no need to "release" isReading here
-						return;
-					}
-
-					if (spaceLeft > 0 && read == 0)
-					{
-						IsDone = true;
-						sourceStream.Dispose();
-						SourceState.SetResult(0);
-						break;
-					}
-
-					// Copy over the data we just read, no way around the lock here...
-					lock (buffer)
-					{
-						Buffer.BlockCopy(localReadBuffer, 0, buffer, bytesInBuffer, read);
-						bytesInBuffer += read;
-					}
-				}
-
-				// Signal we're not reading anymore
-				Interlocked.Exchange(ref isReading, 0);
-			}
-
-			public override void EnterDrainMode()
-			{
-				// In "auto fill mode" the buffer will get used by the filling task as well as the mixer.
-				// We have to synchronize access.
-				// A simple lock() will be perfectly fine in this situation 
-				Monitor.Enter(buffer);
-			}
-
-			public override void ExitDrainMode(int bytesDrained)
-			{
-				Buffer.BlockCopy(buffer, bytesDrained, buffer, 0, buffer.Length - bytesDrained);
-				bytesInBuffer -= bytesDrained;
-				TotalBytesProcessed += bytesDrained;
-				dataDrainedEvent.Set();
-
-				Monitor.Exit(buffer);
-			}
-
-			public override void Cancel()
-			{
-				IsDone = true;
-				sourceStream.Dispose();
-				SourceState.SetResult(0);
-			}
+			if (bytesToMix == int.MaxValue)
+				return 0;
+			return bytesToMix;
 		}
 	}
 }

@@ -143,7 +143,10 @@
     <Compile Include="CommandHandler.cs" />
     <Compile Include="Commands\HelpCommand.cs" />
     <Compile Include="Preconditions\RequireUserInVoice.cs" />
+    <Compile Include="Services\Audio\Helpers\AudioSources\AudioSource.cs" />
+    <Compile Include="Services\Audio\Helpers\AudioSources\AutoFillingSource.cs" />
     <Compile Include="Services\Audio\Helpers\CircularBuffer.cs" />
+    <Compile Include="Services\Audio\Helpers\AudioSources\DirectSource.cs" />
     <Compile Include="Services\Audio\Helpers\IMixerSource.cs" />
     <Compile Include="Services\Audio\Helpers\PcmMixer.cs" />
     <Compile Include="Services\Audio\SoundBoardClient.cs" />
